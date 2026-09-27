@@ -1,8 +1,8 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
-import { diffAgainstSnapshot } from './diff';
+import { computePropertyChanges, diffAgainstSnapshot, examplesAffectedBy } from './diff';
 import { SpecStore } from './store';
-import type { ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertySpec, ValidationIssue } from './types';
+import type { ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertyChange, PropertySpec, ValidationIssue } from './types';
 
 type EditorTab = 'overview' | 'api' | 'accessibility' | 'examples' | 'history';
 
@@ -110,6 +110,14 @@ export class SpecA11yWorkbench extends LitElement {
     .diff { display: grid; gap: 7px; margin-top: 9px; }
     .diff-row { border: 1px solid var(--spectrum-gray-300); border-radius: 8px; padding: 9px; font-size: 11px; }
     .diff-row b { display: block; margin-bottom: 4px; text-transform: capitalize; }
+    .preflight-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 9px; }
+    .preflight-columns h4, .preflight-plan h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    .change-row { display: grid; gap: 6px; border: 1px solid var(--spectrum-gray-300); border-radius: 8px; padding: 9px; margin-bottom: 7px; font-size: 12px; }
+    .change-row > span { color: var(--spectrum-gray-700); }
+    .change-row.compatible { border-left: 4px solid var(--spectrum-green-700); }
+    .change-row.breaking { border-left: 4px solid var(--spectrum-red-600); }
+    .change-row.muted { color: var(--spectrum-gray-700); }
+    .preflight-plan { display: grid; gap: 8px; margin-top: 12px; }
     .before { color: var(--spectrum-red-800); white-space: pre-wrap; }
     .after { color: var(--spectrum-green-900); white-space: pre-wrap; }
     pre { white-space: pre-wrap; word-break: break-word; background: #202020; color: #f5f5f5; padding: 12px; border-radius: 8px; font-size: 12px; }
@@ -128,6 +136,7 @@ export class SpecA11yWorkbench extends LitElement {
       .layout { grid-template-columns: 1fr; }
       .sidebar { border-right: 0; border-bottom: 1px solid var(--spectrum-gray-300); }
       .inspector { grid-template-columns: 1fr; }
+      .preflight-columns { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
       .field.full { grid-column: auto; }
       .main { padding: 14px; }
@@ -246,7 +255,16 @@ export class SpecA11yWorkbench extends LitElement {
           <p>${component.purpose}</p>
         </div>
         <div class="actions">
-          <select aria-label="组件状态" .value=${component.status} @change=${(event: Event) => this.store.updateComponent({ status: (event.currentTarget as HTMLSelectElement).value as ComponentSpec['status'] })}>
+          <select aria-label="组件状态" .value=${component.status} @change=${(event: Event) => {
+            const select = event.currentTarget as HTMLSelectElement;
+            const next = select.value as ComponentSpec['status'];
+            if (next === 'published' && this.store.getPendingMigrationExamples(component).length) {
+              select.value = component.status;
+              this.flash('存在待迁移示例，不允许切换到已发布');
+              return;
+            }
+            this.store.updateComponent({ status: next });
+          }}>
             <option value="draft">草稿</option>
             <option value="review">待审</option>
             <option value="published">已发布</option>
@@ -395,10 +413,72 @@ export class SpecA11yWorkbench extends LitElement {
         ${snapshot ? html`
           <h3>与最近快照的差异</h3>
           ${rows.length ? html`<div class="diff">${rows.map((row) => html`<div class="diff-row"><b>${row.field}</b><span class="before">- ${row.before || '（空）'}</span><br /><span class="after">+ ${row.after || '（空）'}</span></div>`)}</div>` : html`<div class="issue info">当前内容与最近快照一致。</div>`}
+          <h3>改动预检表</h3>
+          ${this.renderPreflight(component, snapshot.revision)}
         ` : html`<div class="empty">保存一次版本后即可比较字段、属性和示例变化。</div>`}
         ${this.hasStaleExamples(component) ? html`<div class="issue warning" style="margin-top: 14px"><strong>检测到待迁移示例</strong>迁移会保留代码内容，清理已删除属性引用并更新契约版本。<br /><button @click=${() => this.store.migrateExamples()}>立即迁移</button></div>` : nothing}
       </section>
     `;
+  }
+
+  private renderPreflight(component: ComponentSpec, snapshotRevision: number): TemplateResult {
+    const changes = computePropertyChanges(component, component.snapshots[0]);
+    if (!changes.length) {
+      return html`<div class="issue info"><strong>属性契约无变化</strong>与最近快照 r${snapshotRevision} 相比，没有属性出现、移除或修改。</div>`;
+    }
+    const compatible = changes.filter((item) => !item.breaking);
+    const breaking = changes.filter((item) => item.breaking);
+    const replacements = component.preflightReplacements ?? {};
+    const coveredAffected = new Set<string>();
+    const uncoveredAffected = new Set<string>();
+    for (const change of breaking) {
+      const bucket = replacements[change.key] ? coveredAffected : uncoveredAffected;
+      examplesAffectedBy(component, change).forEach((example) => bucket.add(example.id));
+    }
+    const rewriteExamples = component.examples.filter((item) => coveredAffected.has(item.id) && !uncoveredAffected.has(item.id));
+    const pendingExamples = component.examples.filter((item) => uncoveredAffected.has(item.id) || item.stale);
+    return html`
+      <div class="preflight-columns">
+        <div>
+          <h4>兼容变化（${compatible.length}）</h4>
+          ${compatible.length ? compatible.map((change) => html`
+            <div class="change-row compatible"><b>${this.changeKindLabel(change.kind)} · ${change.afterName || change.beforeName}</b><span>${change.detail}</span></div>
+          `) : html`<div class="change-row muted">无兼容变化。</div>`}
+        </div>
+        <div>
+          <h4>破坏变化（${breaking.length}）</h4>
+          ${breaking.length ? breaking.map((change) => html`
+            <div class="change-row breaking">
+              <b>${this.changeKindLabel(change.kind)} · ${change.beforeName || change.afterName}</b>
+              <span>${change.detail} · 影响 ${examplesAffectedBy(component, change).length} 个示例</span>
+              <label class="field">
+                <span>替代属性</span>
+                <select .value=${replacements[change.key] ?? ''} @change=${(event: Event) => this.store.setPreflightReplacement(change.key, (event.currentTarget as HTMLSelectElement).value)}>
+                  <option value="">未指定（保持待迁移）</option>
+                  ${component.properties.map((property) => html`<option value=${property.id}>${property.name}</option>`)}
+                </select>
+              </label>
+            </div>
+          `) : html`<div class="change-row muted">无破坏变化。</div>`}
+        </div>
+      </div>
+      <div class="preflight-plan">
+        <h4>执行预览</h4>
+        ${rewriteExamples.length
+          ? html`<div class="issue info"><strong>将改写 ${rewriteExamples.length} 个示例</strong>${rewriteExamples.map((item) => item.title).join('、')}。</div>`
+          : html`<div class="issue info"><strong>暂无可改写示例</strong>为破坏项指定替代属性后，被覆盖的示例会列入改写。</div>`}
+        ${pendingExamples.length
+          ? html`<div class="issue warning"><strong>待迁移 ${pendingExamples.length} 个示例</strong>${pendingExamples.map((item) => item.title).join('、')}。存在待迁移示例时不允许切换到已发布。</div>`
+          : nothing}
+        <div>
+          <sp-button size="s" variant="accent" ?disabled=${!rewriteExamples.length} @click=${() => { this.store.executePreflightMigration(); this.flash('已按预检表改写示例，撤销可回到执行前'); }}>执行预检迁移</sp-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private changeKindLabel(kind: PropertyChange['kind']): string {
+    return { added: '出现', removed: '移除', renamed: '名称变更', type: '类型变更', required: '必填变更' }[kind];
   }
 
   private renderPreview(component?: ComponentSpec): TemplateResult {

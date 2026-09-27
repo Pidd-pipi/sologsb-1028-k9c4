@@ -1,5 +1,6 @@
 import { createInitialState } from './data';
-import type { ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
+import { computePropertyChanges, examplesAffectedBy } from './diff';
+import type { ComponentExample, ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1028-workspace-v1';
 
@@ -43,6 +44,7 @@ export class SpecStore extends EventTarget {
       purpose: '说明该组件解决的用户问题。',
       usage: '说明何时使用、何时不要使用。',
       properties: [],
+      preflightReplacements: {},
       states: 'default、hover、focus-visible、disabled。',
       keyboardBehavior: '记录 Tab、Enter、Space、方向键和 Esc 等行为。',
       screenReader: '记录角色、名称、状态和动态播报。',
@@ -176,6 +178,75 @@ export class SpecStore extends EventTarget {
     });
   }
 
+  setPreflightReplacement(changeKey: string, propertyId: string) {
+    const selected = this.selected;
+    if (!selected) return;
+    this.commit('设置替代属性', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      const replacements = { ...(target.preflightReplacements ?? {}) };
+      if (propertyId) replacements[changeKey] = propertyId;
+      else delete replacements[changeKey];
+      target.preflightReplacements = replacements;
+    });
+  }
+
+  getPendingMigrationExamples(component: ComponentSpec): ComponentExample[] {
+    const breaking = computePropertyChanges(component, component.snapshots[0]).filter((item) => item.breaking);
+    const replacements = component.preflightReplacements ?? {};
+    const pending = new Set<string>();
+    for (const change of breaking) {
+      if (replacements[change.key]) continue;
+      examplesAffectedBy(component, change).forEach((example) => pending.add(example.id));
+    }
+    component.examples.forEach((example) => {
+      if (example.stale) pending.add(example.id);
+    });
+    return component.examples.filter((example) => pending.has(example.id));
+  }
+
+  executePreflightMigration() {
+    const selected = this.selected;
+    if (!selected) return;
+    const breaking = computePropertyChanges(selected, selected.snapshots[0]).filter((item) => item.breaking);
+    const replacements = selected.preflightReplacements ?? {};
+    const covered = new Set<string>();
+    const uncovered = new Set<string>();
+    for (const change of breaking) {
+      const bucket = replacements[change.key] ? covered : uncovered;
+      examplesAffectedBy(selected, change).forEach((example) => bucket.add(example.id));
+    }
+    const rewritable = new Set([...covered].filter((id) => !uncovered.has(id)));
+    if (!rewritable.size) return;
+    this.commit('执行预检迁移', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      const byId = new Map(target.properties.map((item) => [item.id, item]));
+      for (const change of breaking) {
+        const replacement = byId.get(replacements[change.key] ?? '');
+        if (!replacement) continue;
+        for (const example of examplesAffectedBy(target, change)) {
+          if (!rewritable.has(example.id)) continue;
+          if (change.kind === 'added' || change.kind === 'required') {
+            if (!example.propertyIds.includes(replacement.id)) example.propertyIds.push(replacement.id);
+          } else {
+            example.propertyIds = [...new Set(example.propertyIds.map((id) => (id === change.beforeId ? replacement.id : id)))];
+            if (change.beforeName && change.beforeName !== replacement.name) {
+              example.code = example.code.split(change.beforeName).join(replacement.name);
+            }
+          }
+        }
+      }
+      target.examples.forEach((example) => {
+        if (!rewritable.has(example.id)) return;
+        example.stale = false;
+        example.staleReason = '';
+        example.createdFromRevision = target.revision;
+      });
+      target.updatedAt = new Date().toISOString();
+    });
+  }
+
   migrateExamples() {
     const selected = this.selected;
     if (!selected) return;
@@ -225,6 +296,10 @@ export class SpecStore extends EventTarget {
       if (contractChanged && component.examples.length) {
         issues.push({ id: `${component.id}-contract`, level: 'info', componentId: component.id, target: component.name, message: '属性契约或交互签名发生变化，建议创建快照并迁移示例。', field: 'properties' });
       }
+      const pending = this.getPendingMigrationExamples(component);
+      if (pending.length) {
+        issues.push({ id: `${component.id}-pending-migration`, level: 'warning', componentId: component.id, target: component.name, message: `${pending.length} 个示例仍待迁移，处理前不允许切换到已发布。`, field: 'examples' });
+      }
     }
     return issues;
   }
@@ -271,7 +346,13 @@ export class SpecStore extends EventTarget {
   private load(): WorkspaceState {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) return JSON.parse(saved) as WorkspaceState;
+      if (saved) {
+        const state = JSON.parse(saved) as WorkspaceState;
+        state.components.forEach((component) => {
+          component.preflightReplacements ??= {};
+        });
+        return state;
+      }
     } catch {
       // A corrupted local draft falls back to the bundled demo data.
     }

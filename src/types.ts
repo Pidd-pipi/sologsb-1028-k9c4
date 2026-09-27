@@ -29,6 +29,7 @@ export interface ComponentSpec {
   purpose: string;
   usage: string;
   properties: PropertySpec[];
+  preflightReplacements: Record<string, string>;
   states: string;
   keyboardBehavior: string;
   screenReader: string;
@@ -65,4 +66,17 @@ export interface DiffRow {
   field: string;
   before: string;
   after: string;
+}
+
+export type PropertyChangeKind = 'added' | 'removed' | 'renamed' | 'type' | 'required';
+
+export interface PropertyChange {
+  key: string;
+  kind: PropertyChangeKind;
+  breaking: boolean;
+  beforeId: string;
+  afterId: string;
+  beforeName: string;
+  afterName: string;
+  detail: string;
 }

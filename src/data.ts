@@ -10,6 +10,7 @@ const components: ComponentSpec[] = [
     status: 'published',
     purpose: '触发一个明确、可立即完成的动作。',
     usage: '主操作优先使用强调样式；同一区域最多保留一个主按钮。',
+    preflightReplacements: {},
     properties: [
       { id: 'p-label', name: 'label', type: 'string', required: true, defaultValue: '保存', description: '按钮可见文字，同时作为无障碍名称。' },
       { id: 'p-disabled', name: 'disabled', type: 'boolean', required: false, defaultValue: 'false', description: '禁用交互，但不隐藏按钮。' },
@@ -51,6 +52,7 @@ const components: ComponentSpec[] = [
     status: 'review',
     purpose: '收集单行文本，并始终向所有用户暴露字段名称。',
     usage: '标签放在输入框上方；帮助文本解释格式，错误文本说明修复方式。',
+    preflightReplacements: {},
     properties: [
       { id: 'p-field-label', name: 'label', type: 'string', required: true, defaultValue: '组件名称', description: '字段可见标签，并关联输入框。' },
       { id: 'p-field-required', name: 'required', type: 'boolean', required: false, defaultValue: 'false', description: '标记必填；提交后再显示错误。' },
@@ -83,6 +85,7 @@ const components: ComponentSpec[] = [
     status: 'draft',
     purpose: '在不离开当前上下文的情况下完成一段有边界的任务。',
     usage: '仅在用户必须处理内容时使用；关闭后恢复触发元素焦点。',
+    preflightReplacements: {},
     properties: [
       { id: 'p-dialog-open', name: 'open', type: 'boolean', required: true, defaultValue: 'false', description: '控制对话框可见性。' },
       { id: 'p-dialog-title', name: 'heading', type: 'string', required: true, defaultValue: '确认操作', description: '对话框标题，同时作为无障碍名称。' },
