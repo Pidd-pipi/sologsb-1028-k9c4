@@ -1,4 +1,6 @@
 import { createInitialState } from './data';
+import { applyPrecheck, hasUncoveredMigrations } from './precheck';
+import type { AppliedPrecheck } from './precheck';
 import type { ComponentSnapshot, ComponentSpec, ValidationIssue, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1028-workspace-v1';
@@ -51,7 +53,8 @@ export class SpecStore extends EventTarget {
       examples: [],
       revision: 1,
       updatedAt: new Date().toISOString(),
-      snapshots: []
+      snapshots: [],
+      migrationPlan: {}
     };
     this.commit('新建组件', (state) => {
       state.components.unshift(component);
@@ -62,6 +65,11 @@ export class SpecStore extends EventTarget {
   updateComponent(patch: Partial<ComponentSpec>, markExamplesStale = false) {
     const selected = this.selected;
     if (!selected) return;
+    if (patch.status === 'published' && patch.status !== selected.status && hasUncoveredMigrations(selected)) {
+      this.lastAction = '阻止发布';
+      this.emit();
+      return;
+    }
     this.commit('编辑组件', (state) => {
       const target = state.components.find((item) => item.id === selected.id);
       if (!target) return;
@@ -98,6 +106,29 @@ export class SpecStore extends EventTarget {
       const property = target?.properties.find((item) => item.id === propertyId);
       if (target && property) Object.assign(property, patch);
     });
+  }
+
+  /** 预检选择随草稿保留：直接写入当前草稿，不产生撤销记录。 */
+  setReplacement(oldPropertyId: string, replacementId: string) {
+    const target = this.state.components.find((item) => item.id === this.state.selectedId);
+    if (!target) return;
+    target.migrationPlan = { ...(target.migrationPlan ?? {}), [oldPropertyId]: replacementId };
+    this.persist();
+    this.emit();
+  }
+
+  /** 执行改动预检：按替代属性选择改写已覆盖示例，未覆盖示例留在待迁移。 */
+  applyPrecheck(): AppliedPrecheck | null {
+    const selected = this.selected;
+    if (!selected) return null;
+    let result: AppliedPrecheck | null = null;
+    this.commit('执行改动预检', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      result = applyPrecheck(target);
+      target.updatedAt = new Date().toISOString();
+    });
+    return result;
   }
 
   removeProperty(propertyId: string) {
@@ -224,6 +255,9 @@ export class SpecStore extends EventTarget {
       }
       if (contractChanged && component.examples.length) {
         issues.push({ id: `${component.id}-contract`, level: 'info', componentId: component.id, target: component.name, message: '属性契约或交互签名发生变化，建议创建快照并迁移示例。', field: 'properties' });
+      }
+      if (hasUncoveredMigrations(component)) {
+        issues.push({ id: `${component.id}-precheck-block`, level: 'error', componentId: component.id, target: component.name, message: '改动预检存在未覆盖的破坏性属性引用，示例仍待迁移，不能切换到已发布。', field: 'examples' });
       }
     }
     return issues;

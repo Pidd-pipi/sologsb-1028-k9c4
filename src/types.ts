@@ -38,6 +38,8 @@ export interface ComponentSpec {
   revision: number;
   updatedAt: string;
   snapshots: ComponentSnapshot[];
+  /** 改动预检中为破坏项指定的替代属性：旧属性 id -> 替代属性 id（空串表示未指定）。 */
+  migrationPlan?: Record<string, string>;
 }
 
 export interface ComponentSnapshot {

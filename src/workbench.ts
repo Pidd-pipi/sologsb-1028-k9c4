@@ -1,6 +1,7 @@
 import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 import { diffAgainstSnapshot } from './diff';
+import { CHANGE_LABELS, evaluatePrecheck, hasUncoveredMigrations, resolveReplacement, type PrecheckReport, type PropertyChangeRow } from './precheck';
 import { SpecStore } from './store';
 import type { ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertySpec, ValidationIssue } from './types';
 
@@ -112,6 +113,31 @@ export class SpecA11yWorkbench extends LitElement {
     .diff-row b { display: block; margin-bottom: 4px; text-transform: capitalize; }
     .before { color: var(--spectrum-red-800); white-space: pre-wrap; }
     .after { color: var(--spectrum-green-900); white-space: pre-wrap; }
+    .precheck-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 10px; }
+    .precheck-col { border: 1px solid var(--spectrum-gray-300); border-radius: 12px; padding: 12px; background: var(--spectrum-gray-75, var(--spectrum-gray-100)); }
+    .precheck-col h4 { margin: 0 0 10px; font-size: 12px; }
+    .precheck-col.breaking { border-color: color-mix(in srgb, var(--spectrum-red-600) 55%, var(--spectrum-gray-300)); }
+    .precheck-col.compatible { border-color: color-mix(in srgb, var(--spectrum-green-700) 45%, var(--spectrum-gray-300)); }
+    .change-list { display: grid; gap: 9px; }
+    .precheck-empty { color: var(--spectrum-gray-700); font-size: 12px; padding: 8px 2px; }
+    .change-row { border: 1px solid var(--spectrum-gray-300); border-radius: 9px; padding: 10px; background: var(--spectrum-gray-50); display: grid; gap: 7px; }
+    .change-row.breaking { border-left: 4px solid var(--spectrum-red-600); }
+    .change-row.compatible { border-left: 4px solid var(--spectrum-green-700); }
+    .change-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+    .tag { border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 700; background: var(--spectrum-gray-300); }
+    .tag.added, .tag.required-relaxed { background: var(--spectrum-green-300); }
+    .tag.removed, .tag.required-tightened { background: var(--spectrum-red-400); }
+    .tag.renamed, .tag.type-changed { background: var(--spectrum-orange-300); }
+    .change-detail { margin: 0; font-size: 12px; }
+    .replacement-field { display: grid; gap: 4px; font-size: 11px; }
+    .replacement-field select { padding: 6px 8px; font-size: 12px; }
+    .cover-pill { justify-self: start; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 700; }
+    .cover-pill.covered { background: var(--spectrum-green-300); }
+    .cover-pill.uncovered { background: var(--spectrum-red-400); }
+    .reference-hint { font-size: 11px; color: var(--spectrum-gray-700); }
+    .precheck-impact { margin-top: 12px; display: grid; gap: 8px; }
+    .precheck-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .publish-block { font-size: 11px; color: var(--spectrum-red-800); background: var(--spectrum-red-200); border-radius: 8px; padding: 6px 9px; max-width: 260px; }
     pre { white-space: pre-wrap; word-break: break-word; background: #202020; color: #f5f5f5; padding: 12px; border-radius: 8px; font-size: 12px; }
     .search-empty { padding: 20px 8px; color: var(--spectrum-gray-700); font-size: 13px; }
     .footer-hint { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 30; background: #202020; color: white; border-radius: 999px; padding: 6px 12px; font-size: 11px; opacity: .9; }
@@ -129,6 +155,7 @@ export class SpecA11yWorkbench extends LitElement {
       .sidebar { border-right: 0; border-bottom: 1px solid var(--spectrum-gray-300); }
       .inspector { grid-template-columns: 1fr; }
       .form-grid { grid-template-columns: 1fr; }
+      .precheck-grid { grid-template-columns: 1fr; }
       .field.full { grid-column: auto; }
       .main { padding: 14px; }
       .title-row { display: grid; }
@@ -246,11 +273,12 @@ export class SpecA11yWorkbench extends LitElement {
           <p>${component.purpose}</p>
         </div>
         <div class="actions">
-          <select aria-label="组件状态" .value=${component.status} @change=${(event: Event) => this.store.updateComponent({ status: (event.currentTarget as HTMLSelectElement).value as ComponentSpec['status'] })}>
+          <select aria-label="组件状态" .value=${component.status} @change=${(event: Event) => this.handleStatusChange(component, (event.currentTarget as HTMLSelectElement).value as ComponentSpec['status'])}>
             <option value="draft">草稿</option>
             <option value="review">待审</option>
-            <option value="published">已发布</option>
+            <option value="published" ?disabled=${hasUncoveredMigrations(component)}>已发布${hasUncoveredMigrations(component) ? '（仍有待迁移示例）' : ''}</option>
           </select>
+          ${hasUncoveredMigrations(component) ? html`<span class="publish-block" role="alert">预检存在未覆盖示例，不能切换到已发布。请到「版本」区指定替代属性并执行预检。</span>` : nothing}
           <sp-button variant="secondary" @click=${() => this.store.createSnapshot('编辑器保存')}>保存快照</sp-button>
           ${this.hasStaleExamples(component) ? html`<sp-button variant="accent" @click=${() => { this.store.migrateExamples(); this.flash('示例已迁移到当前契约'); }}>迁移示例</sp-button>` : nothing}
         </div>
@@ -385,6 +413,7 @@ export class SpecA11yWorkbench extends LitElement {
   private renderHistory(component: ComponentSpec): TemplateResult {
     const snapshot = component.snapshots[0];
     const rows = diffAgainstSnapshot(component, snapshot);
+    const report = evaluatePrecheck(component);
     return html`
       <section class="panel">
         <div class="property-head">
@@ -392,12 +421,105 @@ export class SpecA11yWorkbench extends LitElement {
           <sp-button size="s" variant="secondary" @click=${() => this.store.createSnapshot('历史面板保存')}>保存当前版本</sp-button>
         </div>
         <p>当前为 r${component.revision}。最近快照：${snapshot ? `r${snapshot.revision} · ${new Date(snapshot.savedAt).toLocaleString('zh-CN')}` : '暂无'}。</p>
+        ${report ? this.renderPrecheck(component, report) : html`<div class="empty">保存一次版本后即可比较字段、属性和示例变化。</div>`}
         ${snapshot ? html`
-          <h3>与最近快照的差异</h3>
+          <h3 style="margin-top:18px">与最近快照的完整差异</h3>
           ${rows.length ? html`<div class="diff">${rows.map((row) => html`<div class="diff-row"><b>${row.field}</b><span class="before">- ${row.before || '（空）'}</span><br /><span class="after">+ ${row.after || '（空）'}</span></div>`)}</div>` : html`<div class="issue info">当前内容与最近快照一致。</div>`}
-        ` : html`<div class="empty">保存一次版本后即可比较字段、属性和示例变化。</div>`}
+        ` : nothing}
         ${this.hasStaleExamples(component) ? html`<div class="issue warning" style="margin-top: 14px"><strong>检测到待迁移示例</strong>迁移会保留代码内容，清理已删除属性引用并更新契约版本。<br /><button @click=${() => this.store.migrateExamples()}>立即迁移</button></div>` : nothing}
       </section>
+    `;
+  }
+
+  private renderPrecheck(component: ComponentSpec, report: PrecheckReport): TemplateResult {
+    const hasChanges = report.compatible.length + report.breaking.length > 0;
+    return html`
+      <h3>改动预检（对照 r${report.snapshotRevision}）</h3>
+      ${!hasChanges
+        ? html`<div class="issue info">自最近快照以来属性契约未发生变化。</div>`
+        : html`
+          <div class="precheck-grid">
+            <div class="precheck-col compatible">
+              <h4>兼容变化</h4>
+              ${report.compatible.length
+                ? html`<div class="change-list">${report.compatible.map((row) => this.renderChangeRow(component, row, report))}</div>`
+                : html`<div class="precheck-empty">无</div>`}
+            </div>
+            <div class="precheck-col breaking">
+              <h4>破坏性变化（需指定替代属性）</h4>
+              ${report.breaking.length
+                ? html`<div class="change-list">${report.breaking.map((row) => this.renderChangeRow(component, row, report))}</div>`
+                : html`<div class="precheck-empty">无</div>`}
+            </div>
+          </div>
+          ${this.renderPrecheckImpact(component, report)}
+        `}
+    `;
+  }
+
+  private renderChangeRow(component: ComponentSpec, row: PropertyChangeRow, report: PrecheckReport): TemplateResult {
+    const references = row.oldId ? (report.referenceCounts[row.oldId] ?? 0) : 0;
+    const replacement = row.bearing === 'breaking' ? resolveReplacement(row, component.migrationPlan ?? {}) : '';
+    const effective = row.bearing === 'breaking' && replacement && component.properties.some((property) => property.id === replacement);
+    return html`
+      <article class="change-row ${row.bearing}">
+        <div class="change-tags">${row.kinds.map((kind) => html`<span class="tag ${kind}">${CHANGE_LABELS[kind]}</span>`)}</div>
+        <p class="change-detail">${row.detail}</p>
+        ${row.bearing === 'breaking' ? html`
+          <label class="replacement-field">
+            <span>替代属性</span>
+            <select
+              aria-label="为破坏性变化选择替代属性"
+              .value=${effective ? replacement : ''}
+              @change=${(event: Event) => this.store.setReplacement(row.oldId, (event.currentTarget as HTMLSelectElement).value)}
+            >
+              <option value="">${row.kinds.includes('renamed') ? '未指定（默认沿用改名后的属性）' : '未指定，引用示例将留在待迁移'}</option>
+              ${component.properties.map((property) => html`<option value=${property.id}>${property.name} · ${property.type}</option>`)}
+            </select>
+          </label>
+          ${!effective
+            ? html`<span class="cover-pill uncovered">${row.kinds.includes('renamed') ? '默认沿用改名后属性' : '未覆盖'}</span>`
+            : html`<span class="cover-pill covered">已覆盖</span>`}
+        ` : nothing}
+        ${references ? html`<span class="reference-hint">${references} 个示例引用</span>` : nothing}
+      </article>
+    `;
+  }
+
+  private renderPrecheckImpact(component: ComponentSpec, report: PrecheckReport): TemplateResult | typeof nothing {
+    if (!report.breaking.length) return nothing;
+    return html`
+      <div class="precheck-impact">
+        ${report.impacted.length === 0 ? html`<div class="issue info">没有示例引用发生破坏性变化的属性。</div>` : nothing}
+        ${report.toRewrite.length ? html`
+          <div class="issue info">
+            <strong>执行预检时将改写 ${report.toRewrite.length} 个示例</strong>
+            ${report.toRewrite.map((item) => item.title).join('、')}
+          </div>` : nothing}
+        ${report.uncoveredExamples.length ? html`
+          <div class="issue error">
+            <strong>${report.uncoveredExamples.length} 个示例仍留在待迁移（引用的属性尚未被替代属性覆盖）</strong>
+            ${report.uncoveredExamples.map((item) => html`
+              <div>${item.title}：${item.uncoveredBreakers
+                .map((breaker) => component.snapshots[0].component.properties.find((property) => property.id === breaker.oldId)?.name ?? '已删除属性')
+                .join('、')}</div>
+            `)}
+          </div>` : nothing}
+        <div class="precheck-actions">
+          <sp-button
+            variant="accent"
+            ?disabled=${report.toRewrite.length === 0}
+            @click=${() => {
+              const result = this.store.applyPrecheck();
+              if (!result) return;
+              this.flash(result.uncoveredExampleIds.length
+                ? `已改写 ${result.rewrittenExampleIds.length} 个示例，${result.uncoveredExampleIds.length} 个留在待迁移`
+                : `已改写 ${result.rewrittenExampleIds.length} 个示例`);
+            }}
+          >执行预检并改写示例</sp-button>
+          <span class="save-state">预检选择随草稿保留，撤销后回到执行前。</span>
+        </div>
+      </div>
     `;
   }
 
@@ -449,6 +571,15 @@ export class SpecA11yWorkbench extends LitElement {
 
   private statusLabel(status: ComponentSpec['status']): string {
     return { draft: '草稿', review: '待审', published: '已发布' }[status];
+  }
+
+  private handleStatusChange(component: ComponentSpec, status: ComponentSpec['status']) {
+    if (status === 'published' && status !== component.status && hasUncoveredMigrations(component)) {
+      this.flash('仍有示例引用未覆盖的破坏性属性，请先在版本区完成预检');
+      this.requestUpdate();
+      return;
+    }
+    this.store.updateComponent({ status });
   }
 
   private async copy(value: string) {
